@@ -9,16 +9,32 @@
   html, body { height:100%; background:#0a0c10; overflow:hidden; }
   body { display:flex; align-items:center; justify-content:center;
          font-family:"Trebuchet MS","Gill Sans",sans-serif; color:#e9e4d6; }
-  #wrap { position:relative; width:100vw; height:100vh; }
-  canvas { display:block; width:100%; height:100%; }
+  #wrap { position:relative; width:100vw; height:100vh; background:#05070a; }
+  canvas { display:block; width:100%; height:100%; position:absolute; inset:0; }
+  /* --- 2.5D rig: world layers live at different Z depths --- */
+  #stage3d { position:absolute; inset:0; perspective:1000px; perspective-origin:50% 50%; overflow:hidden; }
+  #rig { position:absolute; inset:0; transform-style:preserve-3d; will-change:transform; }
+  #lyrSky   { transform:translateZ(-600px) scale(1.6); }
+  #lyrHills { transform:translateZ(-350px) scale(1.35); }
+  #lyrWater { transform:translateZ(-180px) scale(1.18); }
+  #lyrMain  { transform:translateZ(0); }
+  #hudc { position:absolute; inset:0; }
   #hint { position:absolute; left:50%; bottom:12px; transform:translateX(-50%);
-          font-size:11px; letter-spacing:1px; color:#8b93a2; opacity:.7;
+          font-size:11px; letter-spacing:1px; color:#8b93a2; opacity:.7; z-index:10;
           pointer-events:none; text-transform:uppercase; white-space:nowrap; }
 </style>
 </head>
 <body>
 <div id="wrap">
-  <canvas id="game"></canvas>
+  <div id="stage3d">
+    <div id="rig">
+      <canvas id="lyrSky"></canvas>
+      <canvas id="lyrHills"></canvas>
+      <canvas id="lyrWater"></canvas>
+      <canvas id="lyrMain"></canvas>
+    </div>
+  </div>
+  <canvas id="hudc"></canvas>
   <div id="hint">← → move · Space jump · J slash (hold = heavy) · K roll / air-dash · L parry → J riposte · I focus · M mute</div>
 </div>
 <script>
@@ -29,17 +45,30 @@
    ========================================================================= */
 
 /* ------------------------------- Canvas -------------------------------- */
-const canvas = document.getElementById("game");
-const ctx = canvas.getContext("2d");
+/* 2.5D rig: four world canvases stacked at different CSS translateZ depths
+   (sky → hills → water → gameplay plane) inside a perspective container,
+   plus a flat HUD canvas on top. All draw functions paint through the
+   mutable `ctx` binding — render() points it at each layer in turn. */
+const LYR = ["lyrSky","lyrHills","lyrWater","lyrMain"].map(id=>{
+  const c=document.getElementById(id);
+  return {c, x:c.getContext("2d")};
+});
+const hudCanvas = document.getElementById("hudc");
+const hudCtx = hudCanvas.getContext("2d");
+const rig = document.getElementById("rig");
+let ctx = LYR[3].x;                       // default: gameplay plane
 let VW = 960, VH = 540, scale = 1, offX = 0, offY = 0;
 function resize(){
   const w=window.innerWidth,h=window.innerHeight;
   const dpr=Math.min(window.devicePixelRatio||1,2);
-  canvas.width=Math.floor(w*dpr); canvas.height=Math.floor(h*dpr);
+  for(const L of LYR){ L.c.width=Math.floor(w*dpr); L.c.height=Math.floor(h*dpr); }
+  hudCanvas.width=Math.floor(w*dpr); hudCanvas.height=Math.floor(h*dpr);
   const s=Math.min(w/VW,h/VH);
   scale=s*dpr; offX=(w*dpr-VW*scale)/2; offY=(h*dpr-VH*scale)/2;
 }
 window.addEventListener("resize",resize); resize();
+/* rig tilt state — eased toward movement/terrain targets each frame */
+const rig3d = { rx:0, ry:0, dz:0 };
 
 /* ------------------------------- Utils --------------------------------- */
 const clamp=(v,a,b)=>v<a?a:v>b?b:v;
@@ -757,39 +786,92 @@ function updateParticles(dt){
 }
 
 /* ============================== RENDER ================================ */
-function render(){
+/* Each world layer is painted 1/pre smaller about the frame centre; its CSS
+   translateZ+scale(pre) exactly cancels that at rest, so the game looks
+   identical until the rig tilts/dollies — then layers separate in real 3D. */
+const LPRE=[1.6,1.35,1.18,1];
+function beginLayer(k){
+  const L=LYR[k]; ctx=L.x;
   ctx.setTransform(1,0,0,1,0,0);
-  ctx.fillStyle="#05070a";ctx.fillRect(0,0,canvas.width,canvas.height);
+  ctx.clearRect(0,0,L.c.width,L.c.height);
+  ctx.save();
+  ctx.translate(offX,offY);ctx.scale(scale,scale);
+  ctx.beginPath();ctx.rect(0,0,VW,VH);ctx.clip();
+  const pre=LPRE[k];
+  if(pre!==1){ctx.translate(VW/2,VH/2);ctx.scale(1/pre,1/pre);ctx.translate(-VW/2,-VH/2);}
+}
+function updateRig(){
+  let trx=0,tryy=0,tdz=0;
+  if(gstate===S.TITLE){
+    trx=1.4+Math.sin(titlePulse*0.4)*1.1;
+    tryy=Math.sin(titlePulse*0.23)*2.4;
+    tdz=20;
+  } else if(level){
+    const p=player;
+    const slope=(terr(p.x+30)-terr(p.x-30))/60;
+    tryy=clamp(p.vx/300,-1,1)*3.2;               // camera looks into movement
+    if(level.activeGate)tryy*=0.3;
+    trx=1.0-clamp(slope,-0.6,0.6)*4;             // tilts with the hill under him
+    tdz=(1-cam.z)*140;                           // terrain zoom = physical dolly
+  }
+  rig3d.rx+=(trx-rig3d.rx)*0.05;
+  rig3d.ry+=(tryy-rig3d.ry)*0.05;
+  rig3d.dz+=(tdz-rig3d.dz)*0.05;
+  rig.style.transform=`translateZ(${rig3d.dz.toFixed(1)}px) rotateX(${rig3d.rx.toFixed(2)}deg) rotateY(${rig3d.ry.toFixed(2)}deg)`;
+}
+function render(){
+  updateRig();
+  // ---------- flat HUD canvas ----------
+  ctx=hudCtx;
+  ctx.setTransform(1,0,0,1,0,0);
+  ctx.clearRect(0,0,hudCanvas.width,hudCanvas.height);
+  // letterbox bars outside the virtual frame
+  ctx.fillStyle="#05070a";
+  const fw=VW*scale,fh=VH*scale;
+  ctx.fillRect(0,0,hudCanvas.width,offY);
+  ctx.fillRect(0,offY+fh,hudCanvas.width,hudCanvas.height-offY-fh);
+  ctx.fillRect(0,0,offX,hudCanvas.height);
+  ctx.fillRect(offX+fw,0,hudCanvas.width-offX-fw,hudCanvas.height);
   ctx.save();
   ctx.translate(offX,offY);ctx.scale(scale,scale);
   ctx.beginPath();ctx.rect(0,0,VW,VH);ctx.clip();
 
-  if(gstate===S.TITLE){renderTitle();ctx.restore();return;}
+  if(gstate===S.TITLE){
+    for(let k=0;k<4;k++){const L=LYR[k];L.x.setTransform(1,0,0,1,0,0);L.x.clearRect(0,0,L.c.width,L.c.height);}
+    renderTitle();ctx.restore();return;
+  }
 
   const s=level;
   const shx=cam.shake>0?rand(cam.shake,-cam.shake):0;
   const shy=cam.shake>0?rand(cam.shake,-cam.shake):0;
 
-  // ---------- world space ----------
-  ctx.save();
-  ctx.translate(VW/2+shx,VH/2+shy);
-  ctx.scale(cam.z,cam.z);
-  ctx.translate(-cam.x,-cam.y);
-  const vL=cam.x-VW/2/cam.z-60, vR=cam.x+VW/2/cam.z+60;
-  const vT=cam.y-VH/2/cam.z-60, vB=cam.y+VH/2/cam.z+60;
+  // ---------- world layers, back to front ----------
+  for(let k=0;k<4;k++){
+    beginLayer(k);
+    ctx.save();
+    ctx.translate(VW/2+shx,VH/2+shy);
+    ctx.scale(cam.z,cam.z);
+    ctx.translate(-cam.x,-cam.y);
+    const pre=LPRE[k];
+    const vL=cam.x-(VW/2/cam.z)*pre-80, vR=cam.x+(VW/2/cam.z)*pre+80;
+    const vT=cam.y-(VH/2/cam.z)*pre-80, vB=cam.y+(VH/2/cam.z)*pre+80;
+    if(k===0)drawSkyWorld(s,vL,vR,vT,vB);
+    else if(k===1)drawHillsWorld(s,vL,vR);
+    else if(k===2)drawWaterWorld(s,vL,vR);
+    else{
+      drawTerrain(s,vL,vR);
+      drawProps(s,vL,vR);
+      drawPetals();
+      drawActors();
+      drawParticlesWorld();
+      drawFloats();
+    }
+    ctx.restore();
+    ctx.restore();
+  }
 
-  drawSkyWorld(s,vL,vR,vT,vB);
-  drawHillsWorld(s,vL,vR);
-  drawWaterWorld(s,vL,vR);
-  drawTerrain(s,vL,vR);
-  drawProps(s,vL,vR);
-  drawPetals();
-  drawActors();
-  drawParticlesWorld();
-  drawFloats();
-  ctx.restore();
-
-  // ---------- screen space ----------
+  // ---------- screen space (flat HUD canvas) ----------
+  ctx=hudCtx;
   drawRainScreen(s.rain);
   drawMistScreen(s.mist);
   drawHUD(s);
