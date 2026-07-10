@@ -14,9 +14,11 @@
   /* --- 2.5D rig: world layers live at different Z depths --- */
   #stage3d { position:absolute; inset:0; perspective:1000px; perspective-origin:50% 50%; overflow:hidden; }
   #rig { position:absolute; inset:0; transform-style:preserve-3d; will-change:transform; }
-  #lyrSky   { transform:translateZ(-600px) scale(1.6); }
-  #lyrHills { transform:translateZ(-350px) scale(1.35); }
-  #lyrWater { transform:translateZ(-180px) scale(1.18); }
+  /* layer canvases bleed 20% past the viewport so tilting never reveals bare edges */
+  #rig canvas { left:-20%; top:-20%; width:140%; height:140%; }
+  #lyrSky   { transform:translateZ(-950px) scale(1.95); }
+  #lyrHills { transform:translateZ(-560px) scale(1.56); }
+  #lyrWater { transform:translateZ(-290px) scale(1.29); }
   #lyrMain  { transform:translateZ(0); }
   #hudc { position:absolute; inset:0; }
   #hint { position:absolute; left:50%; bottom:12px; transform:translateX(-50%);
@@ -57,11 +59,13 @@ const hudCanvas = document.getElementById("hudc");
 const hudCtx = hudCanvas.getContext("2d");
 const rig = document.getElementById("rig");
 let ctx = LYR[3].x;                       // default: gameplay plane
-let VW = 960, VH = 540, scale = 1, offX = 0, offY = 0;
+let VW = 960, VH = 540, scale = 1, offX = 0, offY = 0, LPADX = 0, LPADY = 0;
 function resize(){
   const w=window.innerWidth,h=window.innerHeight;
   const dpr=Math.min(window.devicePixelRatio||1,2);
-  for(const L of LYR){ L.c.width=Math.floor(w*dpr); L.c.height=Math.floor(h*dpr); }
+  // layer canvases are 140% of the window (20% bleed each side)
+  LPADX=Math.floor(w*0.20*dpr); LPADY=Math.floor(h*0.20*dpr);
+  for(const L of LYR){ L.c.width=Math.floor(w*dpr)+2*LPADX; L.c.height=Math.floor(h*dpr)+2*LPADY; }
   hudCanvas.width=Math.floor(w*dpr); hudCanvas.height=Math.floor(h*dpr);
   const s=Math.min(w/VW,h/VH);
   scale=s*dpr; offX=(w*dpr-VW*scale)/2; offY=(h*dpr-VH*scale)/2;
@@ -789,33 +793,36 @@ function updateParticles(dt){
 /* Each world layer is painted 1/pre smaller about the frame centre; its CSS
    translateZ+scale(pre) exactly cancels that at rest, so the game looks
    identical until the rig tilts/dollies — then layers separate in real 3D. */
-const LPRE=[1.6,1.35,1.18,1];
+const LPRE=[1.95,1.56,1.29,1];
 function beginLayer(k){
   const L=LYR[k]; ctx=L.x;
   ctx.setTransform(1,0,0,1,0,0);
   ctx.clearRect(0,0,L.c.width,L.c.height);
   ctx.save();
-  ctx.translate(offX,offY);ctx.scale(scale,scale);
-  ctx.beginPath();ctx.rect(0,0,VW,VH);ctx.clip();
+  // no clip: draw bounds limit painting, and the bitmap bleed absorbs tilt
+  ctx.translate(offX+LPADX,offY+LPADY);ctx.scale(scale,scale);
   const pre=LPRE[k];
   if(pre!==1){ctx.translate(VW/2,VH/2);ctx.scale(1/pre,1/pre);ctx.translate(-VW/2,-VH/2);}
 }
 function updateRig(){
   let trx=0,tryy=0,tdz=0;
   if(gstate===S.TITLE){
-    trx=1.4+Math.sin(titlePulse*0.4)*1.1;
-    tryy=Math.sin(titlePulse*0.23)*2.4;
-    tdz=20;
+    trx=2.2+Math.sin(titlePulse*0.4)*2.2;
+    tryy=Math.sin(titlePulse*0.23)*5;
+    tdz=40;
   } else if(level){
     const p=player;
     const slope=(terr(p.x+30)-terr(p.x-30))/60;
-    tryy=clamp(p.vx/300,-1,1)*3.2;               // camera looks into movement
-    if(level.activeGate)tryy*=0.3;
-    trx=1.0-clamp(slope,-0.6,0.6)*4;             // tilts with the hill under him
-    tdz=(1-cam.z)*140;                           // terrain zoom = physical dolly
+    tryy=clamp(p.vx/260,-1,1)*7                  // camera swings into movement
+        +Math.sin(titlePulse*0.31)*1.6;          // constant gentle drift so depth always reads
+    if(level.activeGate)tryy*=0.35;
+    trx=1.6-clamp(slope,-0.6,0.6)*7              // pitches with the hill underfoot
+        -clamp(p.vy/700,-1,1)*2.2                // nods with jumps and falls
+        +Math.sin(titlePulse*0.47)*0.9;
+    tdz=(1-cam.z)*260;                           // terrain zoom = physical dolly through layers
   }
-  rig3d.rx+=(trx-rig3d.rx)*0.05;
-  rig3d.ry+=(tryy-rig3d.ry)*0.05;
+  rig3d.rx+=(trx-rig3d.rx)*0.06;
+  rig3d.ry+=(tryy-rig3d.ry)*0.06;
   rig3d.dz+=(tdz-rig3d.dz)*0.05;
   rig.style.transform=`translateZ(${rig3d.dz.toFixed(1)}px) rotateX(${rig3d.rx.toFixed(2)}deg) rotateY(${rig3d.ry.toFixed(2)}deg)`;
 }
@@ -853,8 +860,10 @@ function render(){
     ctx.scale(cam.z,cam.z);
     ctx.translate(-cam.x,-cam.y);
     const pre=LPRE[k];
-    const vL=cam.x-(VW/2/cam.z)*pre-80, vR=cam.x+(VW/2/cam.z)*pre+80;
-    const vT=cam.y-(VH/2/cam.z)*pre-80, vB=cam.y+(VH/2/cam.z)*pre+80;
+    // margins reach the edge of the bled bitmap so tilt never shows bare canvas
+    const mx=(LPADX/scale)*(pre/cam.z)+80, my=(LPADY/scale)*(pre/cam.z)+80;
+    const vL=cam.x-(VW/2/cam.z)*pre-mx, vR=cam.x+(VW/2/cam.z)*pre+mx;
+    const vT=cam.y-(VH/2/cam.z)*pre-my, vB=cam.y+(VH/2/cam.z)*pre+my;
     if(k===0)drawSkyWorld(s,vL,vR,vT,vB);
     else if(k===1)drawHillsWorld(s,vL,vR);
     else if(k===2)drawWaterWorld(s,vL,vR);
